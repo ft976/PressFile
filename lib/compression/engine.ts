@@ -4,6 +4,7 @@ import {
   getFileExtension,
   getPresetConfig,
   minifyTextContent,
+  validateFileSize,
 } from './format';
 import {
   compressAsZip,
@@ -13,11 +14,7 @@ import {
   recompressZipArchive,
   type CompressedImageResult,
 } from './office-zip';
-import type {
-  CompressionLevel,
-  CompressionPresetConfig,
-  OutputMode,
-} from './types';
+import type { CompressionLevel, CompressionPresetConfig } from './types';
 
 function resolveConfig(
   input: CompressionLevel | CompressionPresetConfig
@@ -121,24 +118,6 @@ function canvasToBlob(
   });
 }
 
-function hasTransparentPixels(canvas: HTMLCanvasElement): boolean {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return false;
-  const { width, height } = canvas;
-  const stepX = Math.max(1, Math.floor(width / 64));
-  const stepY = Math.max(1, Math.floor(height / 64));
-  const data = ctx.getImageData(0, 0, width, height).data;
-  for (let y = 0; y < height; y += stepY) {
-    for (let x = 0; x < width; x += stepX) {
-      const alpha = data[(y * width + x) * 4 + 3];
-      if (alpha < 250) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 function quantizeCanvasColors(
   canvas: HTMLCanvasElement,
   step: number
@@ -199,24 +178,50 @@ export async function compressImageBlob(
     isJpeg
   );
 
+  const targetBytes = Math.max(
+    128,
+    Math.round(inputBlob.size * (1 - config.targetReductionPercent / 100))
+  );
+  const tolerance = Math.max(512, Math.round(inputBlob.size * 0.05));
+
+  const pickBestBlob = (blobs: Blob[]): Blob | null => {
+    let best: Blob | null = null;
+    let bestDist = Infinity;
+    for (const b of blobs) {
+      if (b.size >= inputBlob.size) continue;
+      const dist = Math.abs(b.size - targetBytes);
+      if (!best || dist < bestDist || (dist === bestDist && b.size < best.size)) {
+        best = b;
+        bestDist = dist;
+      }
+    }
+    return best;
+  };
+
   if (targetExt === 'png') {
-    const transparent = hasTransparentPixels(canvas);
-    if (config.targetReductionPercent >= 85) {
-      quantizeCanvasColors(canvas, 28);
-    } else if (config.targetReductionPercent >= 65) {
-      quantizeCanvasColors(canvas, 14);
-    } else if (config.targetReductionPercent >= 40) {
-      quantizeCanvasColors(canvas, 6);
+    const lossless = await canvasToBlob(canvas, 'image/png', 1);
+    const blobs: Blob[] = [lossless];
+    const step =
+      config.targetReductionPercent >= 85
+        ? 16
+        : config.targetReductionPercent >= 65
+          ? 8
+          : config.targetReductionPercent >= 40
+            ? 4
+            : 0;
+    if (step > 0 && Math.abs(lossless.size - targetBytes) > tolerance && lossless.size > targetBytes) {
+      quantizeCanvasColors(canvas, step);
+      blobs.push(await canvasToBlob(canvas, 'image/png', config.imageQuality));
     }
 
-    const pngBlob = await canvasToBlob(canvas, 'image/png', config.imageQuality);
-    if (pngBlob.size < inputBlob.size) {
+    const bestPng = pickBestBlob(blobs);
+    if (bestPng) {
       return {
-        blob: pngBlob,
+        blob: bestPng,
         outputExtension: 'png',
         width: canvas.width,
         height: canvas.height,
-        note: transparent ? 'PNG optimized' : 'PNG palette optimized',
+        note: 'PNG optimized',
       };
     }
 
@@ -227,10 +232,28 @@ export async function compressImageBlob(
     };
   }
 
-  const encoded = await canvasToBlob(canvas, targetMime, config.imageQuality);
-  if (encoded.size < inputBlob.size) {
+  const encodedBlobs: Blob[] = [];
+  let lo = 0.08;
+  let hi = 0.98;
+  let q = Math.max(lo, Math.min(hi, 0.98 - (config.targetReductionPercent / 95) * 0.74));
+  const tightTolerance = Math.max(256, Math.round(inputBlob.size * 0.025));
+  for (let i = 0; i < 5; i += 1) {
+    const candidate = await canvasToBlob(canvas, targetMime, q);
+    encodedBlobs.push(candidate);
+    if (Math.abs(candidate.size - targetBytes) <= tightTolerance) break;
+    if (candidate.size > targetBytes) {
+      hi = Math.max(lo, q - 0.01);
+    } else {
+      lo = Math.min(hi, q + 0.01);
+    }
+    if (lo > hi) break;
+    q = (lo + hi) / 2;
+  }
+
+  const bestRaster = pickBestBlob(encodedBlobs);
+  if (bestRaster) {
     return {
-      blob: encoded,
+      blob: bestRaster,
       outputExtension: targetExt,
       width: canvas.width,
       height: canvas.height,
@@ -292,26 +315,35 @@ export interface CompressSingleFileResult {
 export async function compressSingleFile(
   file: File,
   configInput: CompressionLevel | CompressionPresetConfig,
-  outputMode: OutputMode
+  signal?: AbortSignal
 ): Promise<CompressSingleFileResult> {
-  if (file.size === 0) {
-    throw new Error('File is empty');
+  const sizeCheck = validateFileSize(file.size);
+  if (!sizeCheck.valid) {
+    throw new Error(sizeCheck.error || 'Invalid file size');
   }
 
   const config = resolveConfig(configInput);
 
   if (typeof window !== 'undefined' && typeof fetch === 'function') {
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('strengthPercent', String(config.targetReductionPercent));
-      formData.append('outputMode', outputMode);
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('strengthPercent', String(config.targetReductionPercent));
 
-      const response = await fetch('/api/compress', {
+    let response: Response | null = null;
+    try {
+      response = await fetch('/api/compress', {
         method: 'POST',
         body: formData,
+        signal,
       });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw err;
+      }
+      // Network error falls through to local fallback below
+    }
 
+    if (response) {
       if (response.ok) {
         const blob = await response.blob();
         const ext = getFileExtension(file.name);
@@ -332,32 +364,21 @@ export async function compressSingleFile(
           note,
         };
       }
-    } catch {
-      // Fall back to local browser compression if server endpoint is unavailable
+      const errJson = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      if (errJson?.error) {
+        throw new Error(errJson.error);
+      }
+      if (response.status === 413) {
+        throw new Error('File exceeds maximum 25 MB upload limit');
+      }
     }
   }
 
   const ext = getFileExtension(file.name);
   const category = detectFileCategory(file.name, file.type);
 
-  if (outputMode === 'zip') {
-    const rawBuffer = await file.arrayBuffer();
-    const zipped = await compressAsZip(
-      [{ name: file.name, data: rawBuffer }],
-      config
-    );
-    const zipBlob = new Blob([new Uint8Array(zipped)], {
-      type: 'application/zip',
-    });
-    return {
-      blob: zipBlob,
-      outputName: buildOutputFileName(file.name, 'zip'),
-      outputExtension: 'zip',
-      note: 'Compressed into ZIP',
-    };
-  }
-
-  // 1. Modern Office OpenXML / ODF (DOCX, PPTX, XLSX, ODT, ODP, ODS)
   if (isOfficeZipExtension(ext)) {
     const rawBuffer = await file.arrayBuffer();
     const { buffer, compressedMediaCount, minifiedXmlCount } =
@@ -394,7 +415,6 @@ export async function compressSingleFile(
     };
   }
 
-  // 2. Raster Images (JPG, PNG, WebP, BMP, AVIF)
   if (category === 'image') {
     const { blob, outputExtension, note } = await compressImageBlob(
       file,
@@ -409,7 +429,6 @@ export async function compressSingleFile(
     };
   }
 
-  // 3. PDF Documents (object streams + metadata stripping + embedded JPEG re-compression)
   if (category === 'pdf') {
     const rawBytes = new Uint8Array(await file.arrayBuffer());
     try {
@@ -427,26 +446,14 @@ export async function compressSingleFile(
           outputExtension: 'pdf',
           note:
             compressedImagesCount > 0
-              ? `${compressedImagesCount} PDF ${compressedImagesCount === 1 ? 'image' : 'images'} & streams compressed`
+              ? `${compressedImagesCount} PDF images & streams compressed`
               : 'PDF streams compressed',
         };
       }
     } catch {
-      // Fallback below if PDF uses unsupported features
+      // Fallback below
     }
 
-    const zipped = await compressAsZip(
-      [{ name: file.name, data: rawBytes }],
-      config
-    );
-    if (zipped.byteLength < file.size) {
-      return {
-        blob: new Blob([new Uint8Array(zipped)], { type: 'application/zip' }),
-        outputName: buildOutputFileName(file.name, 'zip'),
-        outputExtension: 'zip',
-        note: 'Packed as ZIP',
-      };
-    }
     return {
       blob: file,
       outputName: buildOutputFileName(file.name, 'pdf'),
@@ -455,11 +462,10 @@ export async function compressSingleFile(
     };
   }
 
-  // 4. ZIP Archives (recompress internal media + DEFLATE level 9)
   if (ext === 'zip') {
     try {
       const rawBuffer = await file.arrayBuffer();
-      const { buffer, compressedMediaCount } = await recompressZipArchive(
+      const { buffer } = await recompressZipArchive(
         rawBuffer,
         config,
         compressEmbeddedOfficeImage
@@ -469,14 +475,11 @@ export async function compressSingleFile(
           blob: new Blob([new Uint8Array(buffer)], { type: 'application/zip' }),
           outputName: buildOutputFileName(file.name, 'zip'),
           outputExtension: 'zip',
-          note:
-            compressedMediaCount > 0
-              ? `${compressedMediaCount} images & archive recompressed`
-              : 'Archive recompressed',
+          note: 'Archive recompressed',
         };
       }
     } catch {
-      // Preserve original if zip is encrypted or malformed
+      // Ignore
     }
     return {
       blob: file,
@@ -486,15 +489,13 @@ export async function compressSingleFile(
     };
   }
 
-  // 5. Text / SVG / JSON / Code
   if (category === 'text') {
     const rawText = await file.text();
     const minified = minifyTextContent(rawText, ext);
     const minifiedBlob = new Blob([minified], {
       type: file.type || 'text/plain',
     });
-    const minificationSavedRatio = (file.size - minifiedBlob.size) / file.size;
-    if (minificationSavedRatio >= 0.05) {
+    if (minifiedBlob.size < file.size) {
       return {
         blob: minifiedBlob,
         outputName: buildOutputFileName(file.name, ext || 'txt'),
@@ -502,36 +503,16 @@ export async function compressSingleFile(
         note: ext === 'svg' ? 'SVG minified' : 'Compacted',
       };
     }
-    const rawBuffer = await file.arrayBuffer();
-    const zipped = await compressAsZip(
-      [{ name: file.name, data: rawBuffer }],
-      config
-    );
-    if (zipped.byteLength < file.size) {
+    if (['svg', 'json', 'xml', 'html', 'htm', 'css'].includes(ext)) {
       return {
-        blob: new Blob([new Uint8Array(zipped)], { type: 'application/zip' }),
-        outputName: buildOutputFileName(file.name, 'zip'),
-        outputExtension: 'zip',
-        note: 'Compressed into ZIP',
+        blob: file,
+        outputName: buildOutputFileName(file.name, ext),
+        outputExtension: ext,
+        note: 'Already compact',
       };
     }
-    if (minifiedBlob.size < file.size) {
-      return {
-        blob: minifiedBlob,
-        outputName: buildOutputFileName(file.name, ext || 'txt'),
-        outputExtension: ext || 'txt',
-        note: 'Compacted',
-      };
-    }
-    return {
-      blob: file,
-      outputName: buildOutputFileName(file.name, ext || 'txt'),
-      outputExtension: ext || 'txt',
-      note: 'Already compact',
-    };
   }
 
-  // 6. Legacy DOC / PPT / Any other file format -> DEFLATE ZIP compression
   const rawBuffer = await file.arrayBuffer();
   const zipped = await compressAsZip(
     [{ name: file.name, data: rawBuffer }],
@@ -542,7 +523,7 @@ export async function compressSingleFile(
       blob: new Blob([new Uint8Array(zipped)], { type: 'application/zip' }),
       outputName: buildOutputFileName(file.name, 'zip'),
       outputExtension: 'zip',
-      note: 'Compressed into ZIP',
+      note: 'Compressed',
     };
   }
 
@@ -550,6 +531,6 @@ export async function compressSingleFile(
     blob: file,
     outputName: buildOutputFileName(file.name, ext),
     outputExtension: ext,
-    note: 'Already compressed',
+    note: 'Already compact',
   };
 }

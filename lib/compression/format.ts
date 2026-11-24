@@ -1,8 +1,9 @@
-import type {
-  CompressedFileEntry,
-  CompressionLevel,
-  CompressionPresetConfig,
-  FileCategory,
+import {
+  MAX_FILE_SIZE_BYTES,
+  type CompressedFileEntry,
+  type CompressionLevel,
+  type CompressionPresetConfig,
+  type FileCategory,
 } from './types';
 
 export const PRESET_CONFIGS: Record<CompressionLevel, CompressionPresetConfig> = {
@@ -11,26 +12,26 @@ export const PRESET_CONFIGS: Record<CompressionLevel, CompressionPresetConfig> =
     label: 'Light',
     description: 'High quality, light compression',
     targetReductionPercent: 35,
-    imageQuality: 0.85,
-    maxDimension: 2400,
-    zipLevel: 6,
+    imageQuality: 0.80,
+    maxDimension: 3315,
+    zipLevel: 5,
   },
   balanced: {
     level: 'balanced',
     label: 'Balanced',
-    description: 'Strong reduction, sharp quality',
+    description: 'Standard compression, sharp quality',
     targetReductionPercent: 70,
-    imageQuality: 0.65,
-    maxDimension: 1600,
+    imageQuality: 0.62,
+    maxDimension: 2220,
     zipLevel: 8,
   },
   maximum: {
     level: 'maximum',
     label: 'Maximum',
-    description: 'Heaviest compression, smallest size',
+    description: 'Strongest compression, compact size',
     targetReductionPercent: 95,
-    imageQuality: 0.36,
-    maxDimension: 1024,
+    imageQuality: 0.50,
+    maxDimension: 1440,
     zipLevel: 9,
   },
 };
@@ -48,8 +49,8 @@ export function getConfigFromStrength(
   if (clamped === 95) return PRESET_CONFIGS.maximum;
 
   const t = (clamped - 10) / 85; // 0..1
-  const imageQuality = Math.round((0.94 - t * 0.58) * 100) / 100;
-  const maxDimension = Math.round(2800 - t * 1776);
+  const imageQuality = Math.round((0.92 - t * 0.42) * 100) / 100; // 0.92 -> 0.50
+  const maxDimension = Math.round(4096 - t * 2656); // 4096 -> 1440
   const zipLevel = Math.max(
     4,
     Math.min(9, Math.round(4 + t * 5))
@@ -67,6 +68,22 @@ export function getConfigFromStrength(
     maxDimension,
     zipLevel,
   };
+}
+
+export function validateFileSize(
+  sizeBytes: number,
+  maxBytes: number = MAX_FILE_SIZE_BYTES
+): { valid: boolean; error?: string } {
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    return { valid: false, error: 'File is empty' };
+  }
+  if (sizeBytes > maxBytes) {
+    return {
+      valid: false,
+      error: `File is ${formatBytes(sizeBytes)}. Maximum size is ${formatBytes(maxBytes)}.`,
+    };
+  }
+  return { valid: true };
 }
 
 export function getFileExtension(fileName: string): string {

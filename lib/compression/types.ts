@@ -1,6 +1,6 @@
 export type CompressionLevel = 'light' | 'balanced' | 'maximum';
 
-export type OutputMode = 'smart' | 'zip';
+export const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
 
 export type FileCategory =
   | 'document'

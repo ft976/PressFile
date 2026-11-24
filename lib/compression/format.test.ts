@@ -175,6 +175,15 @@ test('getConfigFromStrength maps presets and custom slider strengths accurately'
 
   const custom = getConfigFromStrength(55);
   assert.equal(custom.targetReductionPercent, 55);
-  assert.ok(custom.imageQuality < 0.85 && custom.imageQuality > 0.36);
+  assert.ok(custom.imageQuality < 0.85 && custom.imageQuality > 0.50);
   assert.ok(custom.zipLevel >= 6 && custom.zipLevel <= 9);
 });
+
+test('validateFileSize enforces non-empty and 25 MB limits', async () => {
+  const { validateFileSize } = await import('./format');
+  assert.equal(validateFileSize(0).valid, false);
+  assert.equal(validateFileSize(1024).valid, true);
+  assert.equal(validateFileSize(25 * 1024 * 1024).valid, true);
+  assert.equal(validateFileSize(25 * 1024 * 1024 + 1).valid, false);
+});
+

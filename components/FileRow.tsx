@@ -55,9 +55,10 @@ function renderCategoryIcon(category: FileCategory) {
 export default function FileRow({ entry, onDownload, onRemove }: FileRowProps) {
   const typeLabel = getCategoryLabel(entry.category, entry.extension);
   const savings =
-    entry.status === 'done' && entry.compressedSize !== null
+    entry.compressedSize !== null
       ? calculateSavings(entry.originalSize, entry.compressedSize)
       : null;
+  const isUpdating = entry.status === 'compressing';
 
   return (
     <li className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
@@ -77,7 +78,7 @@ export default function FileRow({ entry, onDownload, onRemove }: FileRowProps) {
                   <span>Output {entry.outputExtension.toUpperCase()}</span>
                 </>
               )}
-            {entry.status === 'compressing' && (
+            {isUpdating && (
               <>
                 <span aria-hidden="true">·</span>
                 <span className="inline-flex items-center gap-1 text-blue-700">
@@ -85,7 +86,7 @@ export default function FileRow({ entry, onDownload, onRemove }: FileRowProps) {
                     className="h-3 w-3 animate-spin"
                     aria-hidden="true"
                   />
-                  Compressing
+                  {entry.compressedSize !== null ? 'Updating' : 'Compressing'}
                 </span>
               </>
             )}
@@ -115,13 +116,22 @@ export default function FileRow({ entry, onDownload, onRemove }: FileRowProps) {
       </div>
 
       <div className="flex items-center justify-between gap-4 sm:justify-end">
-        <div className="flex items-center gap-3 font-mono text-xs tabular-nums sm:text-sm">
+        <div
+          className={`flex items-center gap-3 font-mono text-xs tabular-nums transition-opacity duration-150 sm:text-sm ${
+            isUpdating && entry.compressedSize !== null
+              ? 'opacity-60'
+              : 'opacity-100'
+          }`}
+        >
           <span className="text-slate-500">
             {formatBytes(entry.originalSize)}
           </span>
-          <ArrowRight className="h-3.5 w-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+          <ArrowRight
+            className="h-3.5 w-3.5 text-slate-400 shrink-0"
+            aria-hidden="true"
+          />
           <span className="min-w-[4.5rem] text-right font-medium text-slate-900">
-            {entry.status === 'done' && entry.compressedSize !== null
+            {entry.compressedSize !== null
               ? formatBytes(entry.compressedSize)
               : '—'}
           </span>

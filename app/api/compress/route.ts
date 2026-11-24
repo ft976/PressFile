@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { validateFileSize } from '@/lib/compression/format';
 import { compressFileOnServer } from '@/lib/compression/server';
-import type { OutputMode } from '@/lib/compression/types';
 
 export const runtime = 'nodejs';
-export const maxDuration = 120;
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,10 +16,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (file.size === 0) {
+    const sizeCheck = validateFileSize(file.size);
+    if (!sizeCheck.valid) {
       return NextResponse.json(
-        { error: 'File is empty' },
-        { status: 400 }
+        { error: sizeCheck.error || 'Invalid file size' },
+        { status: 413 }
       );
     }
 
@@ -28,16 +29,12 @@ export async function POST(req: NextRequest) {
       ? Math.max(10, Math.min(95, Math.round(rawStrength)))
       : 70;
 
-    const rawMode = formData.get('outputMode');
-    const outputMode: OutputMode = rawMode === 'zip' ? 'zip' : 'smart';
-
     const bytes = new Uint8Array(await file.arrayBuffer());
     const result = await compressFileOnServer(
       file.name,
       file.type,
       bytes,
-      strengthPercent,
-      outputMode
+      strengthPercent
     );
 
     const responseBody = new Uint8Array(result.bytes.byteLength);

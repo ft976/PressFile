@@ -91,6 +91,8 @@ export async function compressOfficePackage(
   const addedContentTypes = new Map<string, string>();
 
   const entryPaths = Object.keys(zip.files);
+  const mediaJobs: Array<() => Promise<void>> = [];
+
   for (const path of entryPaths) {
     const zipEntry = zip.files[path];
     if (!zipEntry || zipEntry.dir) continue;
@@ -98,7 +100,7 @@ export async function compressOfficePackage(
     const lowerPath = path.toLowerCase();
 
     if (
-      config.targetReductionPercent >= 50 &&
+      config.targetReductionPercent >= 35 &&
       lowerPath.startsWith('docprops/thumbnail.')
     ) {
       zip.remove(path);
@@ -114,44 +116,50 @@ export async function compressOfficePackage(
       isMediaFolder &&
       COMPRESSIBLE_MEDIA_EXTS.has(ext)
     ) {
-      const originalBytes = await zipEntry.async('uint8array');
-      try {
-        const result = await compressEmbeddedImage(originalBytes, ext, config);
-        if (!result) continue;
+      mediaJobs.push(async () => {
+        const originalBytes = await zipEntry.async('uint8array');
+        try {
+          const result = await compressEmbeddedImage(originalBytes, ext, config);
+          if (!result) return;
 
-        const outBytes =
-          result instanceof Uint8Array ? result : result.bytes;
-        const convertedExt =
-          result instanceof Uint8Array ? undefined : result.convertedExtension;
+          const outBytes =
+            result instanceof Uint8Array ? result : result.bytes;
+          const convertedExt =
+            result instanceof Uint8Array ? undefined : result.convertedExtension;
 
-        if (outBytes.byteLength < originalBytes.byteLength) {
-          if (convertedExt && convertedExt !== ext) {
-            const newPath = path.replace(
-              new RegExp(`\\.${ext}$`, 'i'),
-              `.${convertedExt}`
-            );
-            zip.remove(path);
-            zip.file(newPath, outBytes, {
-              compression: 'DEFLATE',
-              compressionOptions: { level: config.zipLevel },
-            });
-            renamedPaths.set(path, newPath);
-            if (convertedExt === 'jpg' || convertedExt === 'jpeg') {
-              addedContentTypes.set(convertedExt, 'image/jpeg');
+          if (outBytes.byteLength < originalBytes.byteLength) {
+            if (convertedExt && convertedExt !== ext) {
+              const newPath = path.replace(
+                new RegExp(`\\.${ext}$`, 'i'),
+                `.${convertedExt}`
+              );
+              zip.remove(path);
+              zip.file(newPath, outBytes, {
+                compression: 'DEFLATE',
+                compressionOptions: { level: config.zipLevel },
+              });
+              renamedPaths.set(path, newPath);
+              if (convertedExt === 'jpg' || convertedExt === 'jpeg') {
+                addedContentTypes.set(convertedExt, 'image/jpeg');
+              }
+            } else {
+              zip.file(path, outBytes, {
+                compression: 'DEFLATE',
+                compressionOptions: { level: config.zipLevel },
+              });
             }
-          } else {
-            zip.file(path, outBytes, {
-              compression: 'DEFLATE',
-              compressionOptions: { level: config.zipLevel },
-            });
+            compressedMediaCount += 1;
           }
-          compressedMediaCount += 1;
+        } catch {
+          // Keep original embedded media entry if image re-encoding fails
         }
-      } catch {
-        // Keep original embedded media entry if image re-encoding fails
-      }
-      continue;
+      });
     }
+  }
+
+  // Run embedded media compression in parallel batches of 4
+  for (let i = 0; i < mediaJobs.length; i += 4) {
+    await Promise.all(mediaJobs.slice(i, i + 4).map((job) => job()));
   }
 
   // Update .rels targets, [Content_Types].xml, and minify XML/RELS
@@ -312,24 +320,27 @@ export async function compressPdfBytes(
     updateMetadata: false,
   });
 
+  if (pdfDoc.isEncrypted) {
+    throw new Error('Encrypted PDFs are preserved unmodified');
+  }
+
   let compressedImagesCount = 0;
 
-  if (config.targetReductionPercent >= 50) {
-    if (config.targetReductionPercent >= 70) {
-      const catalog = pdfDoc.catalog;
-      if (catalog.has(PDFName.of('Metadata'))) {
-        catalog.delete(PDFName.of('Metadata'));
-      }
-      pdfDoc.setTitle('');
-      pdfDoc.setAuthor('');
-      pdfDoc.setSubject('');
-      pdfDoc.setKeywords([]);
-      pdfDoc.setProducer('');
-      pdfDoc.setCreator('');
+  if (config.targetReductionPercent >= 70) {
+    const catalog = pdfDoc.catalog;
+    if (catalog.has(PDFName.of('Metadata'))) {
+      catalog.delete(PDFName.of('Metadata'));
     }
+    pdfDoc.setTitle('');
+    pdfDoc.setAuthor('');
+    pdfDoc.setSubject('');
+    pdfDoc.setKeywords([]);
+    pdfDoc.setProducer('');
+    pdfDoc.setCreator('');
+  }
 
-    if (compressPdfImage) {
-      const objects = pdfDoc.context.enumerateIndirectObjects();
+  if (compressPdfImage) {
+    const objects = pdfDoc.context.enumerateIndirectObjects();
       for (const [ref, obj] of objects) {
         if (!(obj instanceof PDFRawStream)) continue;
         const dict = obj.dict;
@@ -365,7 +376,6 @@ export async function compressPdfBytes(
         }
       }
     }
-  }
 
   const buffer = await pdfDoc.save({
     useObjectStreams: true,

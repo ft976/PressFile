@@ -26,7 +26,7 @@ export default function Header({ onTriggerUpload }: HeaderProps) {
           onClick={onTriggerUpload}
           className="inline-flex min-h-10 items-center justify-center rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white whitespace-nowrap shrink-0 transition-colors duration-150 hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
         >
-          Select Files
+          Select File
         </button>
       </div>
     </header>
