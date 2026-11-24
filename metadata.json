@@ -1,0 +1,6 @@
+{
+  "name": "PressFile",
+  "description": "Simple, fast file compressor for DOCX, PPTX, PDF, images, and any file format.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
